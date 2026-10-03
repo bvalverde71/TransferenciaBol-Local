@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
+    <title>Transferencia a Bolivia</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Transferencia a Bolivia</h1>
+        </header>
+
+        <div class="config-display">
+            <h3>Current Configuration</h3>
+            <div class="config-grid">
+                <span>COM_USD: {{ com_usd }}%</span>
+                <span>COM_BOL: {{ com_bol }}%</span>
+                <span>COM_FIJA: {{ com_fija }}</span>
+                <span>COM_VAR: {{ com_var }}%</span>
+            </div>
+        </div>
+
+        <form id="transferForm">
+            <div class="form-group">
+                <label>¿Qué deseas enviar?</label>
+                <div class="checkbox-group">
+                    <label class="checkbox-label">
+                        <input type="radio" name="currency" value="USD" checked>
+                        USD
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="radio" name="currency" value="BOL">
+                        BOL
+                    </label>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="monto">MONTO</label>
+                <input type="number" id="monto" name="monto" step="1" min="0" required 
+                       placeholder="Enter amount" class="input-field">
+            </div>
+
+            <div class="form-group">
+                <label for="tipo_cambio_usd_cad">Tipo de cambio USD/CAD</label>
+                <input type="number" id="tipo_cambio_usd_cad" name="tipo_cambio_usd_cad" 
+                       step="0.0001" min="0" required placeholder="e.g., 1.3500" class="input-field">
+            </div>
+
+            <div class="form-group">
+               <label for="tipo_cambio_usd_bol">
+					Tipo de cambio USD/BOL
+					{% if usd_bol_date %}
+					<span class="rate-date">(Actualizado: {{ usd_bol_date }})</span>
+					{% endif %}
+				</label>
+				<input type="number" id="tipo_cambio_usd_bol" name="tipo_cambio_usd_bol" 
+					   step="0.01" min="0" required placeholder="e.g., 6.96" 
+					   value="{{ usd_bol_rate if usd_bol_rate else '' }}"
+					   data-default-rate="{{ usd_bol_rate if usd_bol_rate else '' }}"
+					   class="input-field">
+				{% if not usd_bol_rate %}
+				<small class="rate-warning">⚠ No se pudo obtener la tasa automáticamente. Ingrese manualmente.</small>
+				{% endif %}
+			</div>
+
+            <div class="button-group">
+                <button type="submit" class="calculate-btn">Calculate</button>
+                <button type="button" class="clear-btn" onclick="clearForm()">Clear All</button>
+            </div>
+        </form>
+
+    <div id="result" class="result-box" style="display:none;">
+        <h3>Monto a Depositar</h3>
+        <div class="result-display">
+                <span id="resultValue">0</span>
+                <span class="result-currency">CAD</span>
+            </div>
+            <div id="resultDetails" class="result-details"></div>
+        </div>
+
+        <div id="error" class="error-message" style="display:none;"></div>
+    </div>
+
+    <script>
+        document.getElementById('transferForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const formData = new FormData(this);
+            const data = {
+                currency: formData.get('currency'),
+                monto: parseFloat(formData.get('monto')),
+                tipo_cambio_usd_cad: parseFloat(formData.get('tipo_cambio_usd_cad')),
+                tipo_cambio_usd_bol: parseFloat(formData.get('tipo_cambio_usd_bol'))
+            };
+            
+            // Validation
+            if (!data.monto || data.monto <= 0) {
+                showError('Please enter a valid amount');
+                return;
+            }
+            if (!data.tipo_cambio_usd_cad || data.tipo_cambio_usd_cad <= 0) {
+                showError('Please enter a valid USD/CAD exchange rate');
+                return;
+            }
+            if (!data.tipo_cambio_usd_bol || data.tipo_cambio_usd_bol <= 0) {
+                showError('Please enter a valid USD/BOL exchange rate');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/calculate', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(data)
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    document.getElementById('resultValue').textContent = result.result;
+                    document.getElementById('resultDetails').textContent = 
+                        `Commission applied: ${result.details.commission} (${result.details.rate_applied})`;
+                    document.getElementById('result').style.display = 'block';
+                    document.getElementById('error').style.display = 'none';
+                } else {
+                    showError(result.error);
+                }
+            } catch (error) {
+                showError('An error occurred. Please try again.');
+            }
+        });
+        
+        function showError(message) {
+            const errorDiv = document.getElementById('error');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+            document.getElementById('result').style.display = 'none';
+        }
+        
+        function clearForm() {
+			// Reset MONTO and USD/CAD to empty
+			document.getElementById('monto').value = '';
+			document.getElementById('tipo_cambio_usd_cad').value = '';
+
+			// Reset USD/BOL to the API-provided default
+			const usdBolField = document.getElementById('tipo_cambio_usd_bol');
+			const defaultRate = usdBolField.getAttribute('data-default-rate') || '';
+			usdBolField.value = defaultRate;
+
+			// Reset radio buttons to default (USD selected)
+			document.querySelector('input[name="currency"][value="USD"]').checked = true;
+
+			// Hide result and error
+			document.getElementById('result').style.display = 'none';
+			document.getElementById('error').style.display = 'none';
+
+			// Remove any error styling
+			document.querySelectorAll('.input-field').forEach(field => {
+				field.style.borderColor = '#e0e0e0';
+			});
+
+			// Focus on first field
+			document.getElementById('monto').focus();
+}
+        
+    </script>
+</body>
+</html>
