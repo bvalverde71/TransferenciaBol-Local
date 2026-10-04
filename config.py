@@ -3,7 +3,7 @@ import os
 from dotenv import load_dotenv
 
 class Config:
-    # === CORE ===
+    # === CORE === # This not used
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'change-this-in-production'
 
     # === INTERNAL CALCULATION PARAMETERS ===
