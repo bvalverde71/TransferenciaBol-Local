@@ -2,6 +2,11 @@
 import sys
 import importlib.util
 import requests               
+import math
+import os
+import logging
+import time
+import warnings           
 
 # === PYTHON 3.14 COMPATIBILITY FIXES ===
 if sys.version_info >= (3, 14):
@@ -23,15 +28,12 @@ from flask_httpauth import HTTPBasicAuth
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.security import generate_password_hash, check_password_hash
-import math
-import os
-import logging
-import time
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from collections import defaultdict
 from config import Config
-import warnings
+from flask import session, redirect, url_for, flash                                   
+
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -139,7 +141,13 @@ transaction_logger = logging.getLogger('transactions')
 access_logger = logging.getLogger('access')
 auth_logger = logging.getLogger('auth')
 
-# === SECURITY: BASIC AUTH ===
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get('user'):
+            return redirect(url_for('login', next=request.path))
+        return f(*args, **kwargs)
+    return decorated# === SECURITY: BASIC AUTH ===
 auth = HTTPBasicAuth()
 auth.realm = "Transferencia a Bolivia"
 
@@ -221,10 +229,36 @@ def log_response(response):
     access_logger.info(f"RESPONSE | {request.method} {request.path} | status={response.status_code}")
     return response
 
+# Module-level cache (persists across requests within the same Lambda container)
+_rate_cache = {
+    'value': None,
+    'date': None,
+    'fetched_at': 0,
+    'stale': False,
+}
+
+CACHE_TTL_SECONDS = 7200  # 2 horas
+
 def get_usd_bol_rate():
     """Fetch the official USD/BOL exchange rate from the API.
     Returns a tuple: (rate_value, rate_date) or (None, None) on failure.
+    - rate_value: float or None
+    - rate_date: string (YYYY-MM-DD) or ''
+    - is_stale: True if we're serving a cached value past its TTL
+                because the API is unreachable.                           
     """
+    now = time.time()
+    age = now - _rate_cache['fetched_at']
+
+    # === CASE 1: Fresh cache — return immediately ===
+    if _rate_cache['value'] is not None and age < CACHE_TTL_SECONDS:
+        logger.info(
+            f"Rate cache HIT (age={age:.0f}s) | "
+            f"rate={_rate_cache['value']} ({_rate_cache['date']})"
+        )
+        return _rate_cache['value'], _rate_cache['date'], False
+
+    # === CASE 2: Cache expired — try to refresh ===                 
     url = "https://apibcb.cucu.bo/api/v1/tc/oficial"
     try:
         response = requests.get(url, timeout=5)
@@ -234,27 +268,73 @@ def get_usd_bol_rate():
         tc = data.get('tc_oficial', {})
         rate = tc.get('valor')
         fecha = tc.get('fecha', '')
+        desactualizado = tc.get('desactualizado', False)                                                
 
         if rate is None:
-            logger.warning("API response missing 'tc_oficial.valor'")
-            return None, None
+            raise ValueError("API response missing 'tc_oficial.valor'")
+                             
 
-        logger.info(f"Fetched USD/BOL rate: {rate} ({fecha})")
-        return rate, fecha
+        # Update cache
+        _rate_cache['value'] = rate
+        _rate_cache['date'] = fecha
+        _rate_cache['fetched_at'] = now
+        _rate_cache['stale'] = bool(desactualizado)
 
-    except requests.exceptions.RequestException as e:
-        logger.warning(f"Could not fetch USD/BOL rate: {e}")
-        return None, None
-    except ValueError as e:
-        logger.warning(f"Invalid JSON from rate API: {e}")
-        return None, None
+        logger.info(
+            f"Rate cache REFRESHED | rate={rate} ({fecha}) | "
+            f"api_stale={desactualizado}"
+        )
+        return rate, fecha, bool(desactualizado)
+
+    except (requests.exceptions.RequestException, ValueError) as e:
+        logger.warning(f"Rate API failed: {e}")
+
+        # === CASE 3: API failed but we have a stale cached value ===
+        if _rate_cache['value'] is not None:
+            logger.warning(
+                f"Rate cache STALE FALLBACK (age={age:.0f}s) | "
+                f"rate={_rate_cache['value']} ({_rate_cache['date']})"
+            )
+            return _rate_cache['value'], _rate_cache['date'], True
+
+        # === CASE 4: API failed and no cache at all ===
+        logger.error("Rate API failed and no cached value available")
+        return None, '', False
 
 # === ROUTES ===
+@app.route('/login', methods=['GET', 'POST'])
+@limiter.limit(app.config['RATE_LOGIN'])
+def login():
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '')
+        ip = get_client_ip()
+
+        user_hash = app.config['USERS'].get(username)
+        if user_hash and check_password_hash(user_hash, password):
+            session.permanent = True
+            session['user'] = username
+            auth_logger.info(f"LOGIN OK | user={username} | ip={ip}")
+            next_url = request.args.get('next') or url_for('index')
+            return redirect(next_url)
+
+        auth_logger.warning(f"LOGIN FAIL | user={username} | ip={ip}")
+        flash('Usuario o contraseña incorrectos', 'error')
+
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    user = session.get('user', 'unknown')
+    session.clear()
+    auth_logger.info(f"LOGOUT | user={user} | ip={get_client_ip()}")
+    return redirect(url_for('login'))
+
 @app.route('/')
 @auth.login_required
 @limiter.limit("60 per minute")
 def index():
-    usd_bol_rate, usd_bol_date = get_usd_bol_rate()                                               
+    usd_bol_rate, usd_bol_date, rate_is_stale = get_usd_bol_rate()                                               
     return render_template(
         'index.html',
         com_usd=app.config['COM_USD'] * 100,
@@ -263,6 +343,8 @@ def index():
         com_var=app.config['COM_VAR'] * 100,
         usd_bol_rate=usd_bol_rate,
         usd_bol_date=usd_bol_date,                          
+        rate_is_stale=rate_is_stale,
+        current_user=session.get('user'),                            
     )
 
 @app.route('/calculate', methods=['POST'])

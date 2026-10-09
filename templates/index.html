@@ -10,6 +10,10 @@
     <div class="container">
         <header>
             <h1>Transferencia a Bolivia</h1>
+			<div class="user-info">
+        <span>Sesión: {{ current_user }}</span>
+        <a href="{{ url_for('logout') }}" class="logout-btn">Cerrar Sesión</a>
+       </div>									
         </header>
 
         <div class="config-display">
@@ -61,7 +65,9 @@
 					   value="{{ usd_bol_rate if usd_bol_rate else '' }}"
 					   data-default-rate="{{ usd_bol_rate if usd_bol_rate else '' }}"
 					   class="input-field">
-				{% if not usd_bol_rate %}
+				{% if rate_is_stale %}
+                <small class="rate-warning">⚠ La tasa puede estar desactualizada. Verifique antes de continuar.
+				{% elif not usd_bol_rate %}
 				<small class="rate-warning">⚠ No se pudo obtener la tasa automáticamente. Ingrese manualmente.</small>
 				{% endif %}
 			</div>
